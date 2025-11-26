@@ -3,6 +3,7 @@ const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
 
 // Express App
 const app = express();
@@ -63,6 +64,62 @@ app.delete("/parcels/:id", async (req, res) => {
     res.status(500).send({ success: false, message: error.message });
   }
 });
+
+// payment related apis
+
+app.post('/create-checkout-session', async (req, res) => {
+  try {
+
+    const paymentInfo = req.body;
+
+    // Stripe amount must be in cents
+    const amount = parseInt(paymentInfo.cost) * 100;
+
+    const session = await stripe.checkout.sessions.create({
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            unit_amount: amount,
+            product_data: {
+              name: paymentInfo.parcelName,
+            },
+          },
+          quantity: 1,
+        },
+      ],
+
+      customer_email: paymentInfo.senderEmail,
+
+      mode: "payment",
+
+      metadata: {
+        parcelId: paymentInfo.parcelId,
+      },
+
+      success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
+      cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancel`,
+    });
+
+    // Return session URL to frontend
+    console.log("Stripe Session URL:", session.url);
+    res.send({ url: session.url });
+
+  } catch (error) {
+    console.log(error);
+    res.status(500).send({ error: "Stripe session creation failed" });
+  }
+});
+
+
+// single parcels post 
+
+app.get('/parcels/:id', async (req, res) =>{
+  const id = req.params.id;
+  const query = {_id: new ObjectId(id)}
+  const result = await parcelCollection.findOne(query);
+  res.send(result);
+})
 
 
     // POST: Add New Parcel
