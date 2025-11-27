@@ -1,5 +1,4 @@
 // server.js
-
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
@@ -10,17 +9,18 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET);
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Middleware
 app.use(
   cors({
     origin: "http://localhost:5173",
     credentials: true,
   })
 );
+
 app.use(express.json());
 
-// MongoDB Setup
+// MongoDB Connection
 const uri = `mongodb+srv://${process.env.BD_USER}:${process.env.BD_PASS}@cluster0.hz6ypdj.mongodb.net/?retryWrites=true&w=majority`;
+
 const client = new MongoClient(uri, {
   serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
 });
@@ -30,7 +30,6 @@ function generateTrackingId() {
   return "TRK-" + Math.random().toString(36).substring(2, 10).toUpperCase();
 }
 
-// DB Connection
 async function run() {
   try {
     await client.connect();
@@ -44,9 +43,8 @@ async function run() {
     app.get("/parcels", async (req, res) => {
       try {
         const { email } = req.query;
-        const query = email ? { senderEmail: email } : {};
-
-        const parcels = await parcelCollection.find(query).sort({ createdAt: -1 }).toArray();
+        const filter = email ? { senderEmail: email } : {};
+        const parcels = await parcelCollection.find(filter).sort({ createdAt: -1 }).toArray();
         res.send(parcels);
       } catch (error) {
         res.status(500).send({ success: false, message: error.message });
@@ -56,7 +54,7 @@ async function run() {
     // DELETE Parcel
     app.delete("/parcels/:id", async (req, res) => {
       try {
-        const { id } = req.params;
+        const id = req.params.id;
         const result = await parcelCollection.deleteOne({ _id: new ObjectId(id) });
 
         if (result.deletedCount === 1) {
@@ -69,7 +67,7 @@ async function run() {
       }
     });
 
-    // STRIPE PAYMENT CHECKOUT
+    // STRIPE CHECKOUT
     app.post("/payment-checkout-session", async (req, res) => {
       try {
         const paymentInfo = req.body;
@@ -99,13 +97,14 @@ async function run() {
         });
 
         return res.send({ url: session.url });
+
       } catch (err) {
         console.error("STRIPE ERROR =>", err);
         return res.status(500).json({ message: err.message });
       }
     });
 
-    // PAYMENT SUCCESS (PATCH)
+    // PAYMENT SUCCESS — FULL DUPLICATE PROTECTED
     app.patch("/payment-success", async (req, res) => {
       try {
         const sessionId = req.query.session_id;
@@ -116,49 +115,65 @@ async function run() {
           return res.send({ success: false, message: "Payment not completed" });
         }
 
+        const transactionId = session.payment_intent;
+
+        // 1️⃣ STOP DUPLICATE PAYMENT
+        const paymentExists = await paymentCollection.findOne({ transactionId });
+
+        if (paymentExists) {
+          return res.send({
+            success: true,
+            message: "Payment already processed",
+            transactionId: paymentExists.transactionId,
+            trackingId: paymentExists.trackingId,
+          });
+        }
+
+        // 2️⃣ GENERATE TRACKING ID
         const trackingId = generateTrackingId();
 
+        // 3️⃣ UPDATE PARCEL
         const parcelId = session.metadata.parcelId;
-        const query = { _id: new ObjectId(parcelId) };
+        const parcelFilter = { _id: new ObjectId(parcelId) };
 
-        // Update parcel status
-        await parcelCollection.updateOne(query, {
+        await parcelCollection.updateOne(parcelFilter, {
           $set: {
             paymentStatus: "paid",
             trackingId: trackingId,
           },
         });
 
-        // Save payment
+        // 4️⃣ SAVE PAYMENT
         const paymentData = {
           amount: session.amount_total / 100,
           currency: session.currency,
           customerEmail: session.customer_email,
-          parcelId: parcelId,
+          parcelId,
           parcelName: session.metadata.parcelName,
-          transactionId: session.payment_intent,
+          transactionId,
+          trackingId,
           paymentStatus: session.payment_status,
           createdAt: new Date(),
         };
 
         await paymentCollection.insertOne(paymentData);
 
-        res.send({
+        return res.send({
           success: true,
           message: "Payment processed successfully",
-          transactionId: session.payment_intent,
-          trackingId: trackingId,
+          transactionId,
+          trackingId,
         });
+
       } catch (error) {
-        res.status(500).send({ success: false, message: error.message });
+        return res.status(500).send({ success: false, message: error.message });
       }
     });
 
     // SINGLE PARCEL
     app.get("/parcels/:id", async (req, res) => {
       const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await parcelCollection.findOne(query);
+      const result = await parcelCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
@@ -167,14 +182,15 @@ async function run() {
       try {
         const parcel = req.body;
         parcel.createdAt = new Date();
-
         const result = await parcelCollection.insertOne(parcel);
 
         res.send({ success: true, message: "Parcel added successfully!", result });
+
       } catch (error) {
         res.status(500).send({ success: false, message: error.message });
       }
     });
+
   } catch (err) {
     console.error("❌ MongoDB Error:", err);
   }
@@ -182,12 +198,10 @@ async function run() {
 
 run();
 
-// Default route
 app.get("/", (req, res) => {
   res.send("Zap Shift Server Running Successfully!");
 });
 
-// Start server
 app.listen(port, () => {
-  console.log(`🚀 Server is running on port ${port}`);
+  console.log(`🚀 Server running on port ${port}`);
 });
